@@ -104,3 +104,13 @@ def test_migrations_are_recorded_once(client):
     with pool.connection() as conn:
         names = [r["name"] for r in conn.execute("SELECT name FROM schema_migrations ORDER BY name").fetchall()]
     assert names == ["001_initial.sql", "002_moderation.sql"]
+
+
+def test_delete_keeps_photos_other_cases_still_use(client):
+    photo = client.post("/api/photos", files={"file": ("c.jpg", jpeg_with_gps(), "image/jpeg")}).json()
+    first = new_case(client, photo_id=photo["id"])
+    other = new_case(client, kind="found", photo_id=photo["id"])
+    res = client.delete(f"/api/cases/{first['slug']}", headers={"X-Owner-Key": first["owner_key"]})
+    assert res.status_code == 200
+    assert client.get(f"/api/cases/{other['slug']}").json()["photo_url"] == photo["url"]
+    assert client.get(photo["url"]).status_code == 200

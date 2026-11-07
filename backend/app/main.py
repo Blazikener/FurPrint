@@ -352,7 +352,12 @@ def delete_case_rows(conn, case_id) -> None:
     ).fetchall()]
     conn.execute("DELETE FROM cases WHERE id = %s", (case_id,))
     if photo_ids:
-        conn.execute("DELETE FROM photos WHERE id = ANY(%s)", (photo_ids,))
+        conn.execute(
+            """DELETE FROM photos p WHERE p.id = ANY(%s)
+               AND NOT EXISTS (SELECT 1 FROM cases c WHERE c.photo_id = p.id)
+               AND NOT EXISTS (SELECT 1 FROM sightings s WHERE s.photo_id = p.id)""",
+            (photo_ids,),
+        )
 
 
 @app.delete("/api/cases/{slug}")
