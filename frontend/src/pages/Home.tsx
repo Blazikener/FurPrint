@@ -120,6 +120,14 @@ export default function Home() {
           <span aria-hidden>🛡️</span>
           <span>We never put a pin on your home, and photos are stripped of location data. Never send money to anyone who says they found your cat.</span>
         </motion.div>
+
+        <motion.footer className="row spread tiny muted" variants={item}>
+          <span>Open source · AGPL-3.0</span>
+          <span className="row" style={{ '--gap': '14px' } as React.CSSProperties}>
+            <Link to="/privacy">Privacy &amp; terms</Link>
+            <a href="https://github.com/Blazikener/FurPrint" target="_blank" rel="noreferrer">GitHub</a>
+          </span>
+        </motion.footer>
       </motion.div>
     </div>
   )

@@ -43,6 +43,26 @@ The model is in `backend/app/zone.py`.
   - Rewards for finders: they attract scams.
 - **Scam warning:** every case page warns people never to pay someone who claims to have the cat.
 
+## Production
+
+- **Migrations:** numbered SQL files in `backend/app/migrations`, applied once each at startup under an advisory lock (`schema_migrations` table).
+- **Retention:** an hourly job deletes cases 30 days after they close, open cases with no update for 180 days, and unattached photos after a day.
+- **Abuse:**
+  - Writes are rate-limited per IP.
+  - Three distinct reporters hide a case until an admin restores it (`/api/admin/reports`, `ADMIN_TOKEN`).
+  - Owners can delete a case and every photo attached to it.
+- **Security headers:** strict CSP (self plus OpenFreeMap tiles), HSTS on HTTPS, `noindex` on case pages and the API.
+- **Owner key:** the private owner link keeps the key in the URL fragment, so it never reaches server logs.
+- **Link previews:** `/c/<slug>` is served with Open Graph tags (cat photo and name), so links shared on WhatsApp show the photo.
+- **Deploy:** `render.yaml` (Docker, health check `/api/health`). The `keepalive` workflow pings the app every 10 minutes once the repo variable `FURPRINT_URL` is set.
+
+| Env var | Purpose |
+| --- | --- |
+| `DATABASE_URL` | Postgres with PostGIS |
+| `ADMIN_TOKEN` | enables `/api/admin/*` (Bearer token); unset = admin API off |
+| `REPORT_SALT` | salt for hashing reporter IPs |
+| `DB_POOL_SIZE`, `CLEANUP_INTERVAL_S`, `HIDE_AFTER_REPORTS`, `LOG_LEVEL` | tuning |
+
 ## Run it
 
 ```bash
@@ -72,7 +92,7 @@ FastAPI · Postgres + PostGIS (geography queries) · H3 · React + Vite PWA · M
 
 - Push or email alerts to helpers nearby (iOS web push needs the app on the home screen).
 - Photo matching between found cats and lost reports.
-- Moderation tools beyond the owner's review.
+- An admin web console (moderation is API-only for now).
 - The non-English flyer lines need a review by native speakers.
 
 ## License

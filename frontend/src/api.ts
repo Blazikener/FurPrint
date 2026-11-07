@@ -54,10 +54,13 @@ export interface Case extends Summary {
   resolved_at: string | null
   area: LatLng
   is_owner: boolean
+  hidden: boolean
   matches: Summary[]
   zone: Zone | null
   sightings: Sighting[]
 }
+
+export type ReportReason = 'spam' | 'scam' | 'offensive' | 'not_a_cat' | 'other'
 
 export interface NearCase extends Summary { area: LatLng }
 
@@ -120,5 +123,7 @@ export const api = {
   review: (slug: string, id: string, review: Sighting['review']) =>
     post(`/api/cases/${slug}/sightings/${id}/review`, { review }, slug),
   setStatus: (slug: string, status: Case['status']) => post(`/api/cases/${slug}/status`, { status }, slug),
+  deleteCase: (slug: string) => request(`/api/cases/${slug}`, { method: 'DELETE' }, slug),
+  report: (slug: string, reason: ReportReason, note = '') => post(`/api/cases/${slug}/report`, { reason, note }),
   near: (p: LatLng) => request<{ cases: NearCase[]; radius_m: number }>(`/api/near?lat=${p.lat}&lng=${p.lng}`),
 }

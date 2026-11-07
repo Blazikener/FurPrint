@@ -1,6 +1,8 @@
 import { AnimatePresence, MotionConfig, motion } from 'motion/react'
 import { lazy, Suspense } from 'react'
 import { Route, Routes, useLocation } from 'react-router-dom'
+import { ErrorBoundary } from './components/ErrorBoundary'
+import { OfflineBanner } from './components/Offline'
 import { Spinner, ToastProvider } from './components/ui'
 import Home from './pages/Home'
 
@@ -8,6 +10,7 @@ const Report = lazy(() => import('./pages/Report'))
 const CaseView = lazy(() => import('./pages/CaseView'))
 const Flyer = lazy(() => import('./pages/Flyer'))
 const Near = lazy(() => import('./pages/Near'))
+const Privacy = lazy(() => import('./pages/Privacy'))
 
 function Page({ children }: { children: React.ReactNode }) {
   return (
@@ -23,6 +26,8 @@ export default function App() {
   return (
     <MotionConfig reducedMotion="user">
       <ToastProvider>
+        <OfflineBanner />
+        <ErrorBoundary>
         <Suspense fallback={<div className="center" style={{ paddingTop: 120 }}><Spinner /></div>}>
           <AnimatePresence mode="wait" initial={false}>
             <Routes location={location} key={location.pathname}>
@@ -31,10 +36,12 @@ export default function App() {
               <Route path="/c/:slug" element={<Page><CaseView /></Page>} />
               <Route path="/c/:slug/flyer" element={<Page><Flyer /></Page>} />
               <Route path="/near" element={<Page><Near /></Page>} />
+              <Route path="/privacy" element={<Page><Privacy /></Page>} />
               <Route path="*" element={<Page><div className="container stack center" style={{ paddingTop: 80 }}><h2>Page not found</h2><a href="/">Go home</a></div></Page>} />
             </Routes>
           </AnimatePresence>
         </Suspense>
+        </ErrorBoundary>
       </ToastProvider>
     </MotionConfig>
   )

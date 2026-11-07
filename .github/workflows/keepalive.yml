@@ -1,0 +1,14 @@
+name: Keep production awake
+# Render's free tier sleeps after 15 idle minutes; a cold start would make a
+# panicking owner wait 30-60 s. Set the repo variable FURPRINT_URL to enable.
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+jobs:
+  ping:
+    if: vars.FURPRINT_URL != ''
+    runs-on: ubuntu-latest
+    steps:
+      - run: curl -fsS --retry 3 --max-time 60 "${{ vars.FURPRINT_URL }}/api/health"

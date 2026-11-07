@@ -20,6 +20,7 @@ export default function Report() {
   const [catType, setCatType] = useState<CatType | null>(lost ? null : 'unknown')
   const [homeType, setHomeType] = useState<HomeType>('apartment')
   const [seenAt, setSeenAt] = useState(() => toLocalInput(new Date()))
+  const [maxTime] = useState(() => toLocalInput(new Date(Date.now() + 60_000)))
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
   const [busy, setBusy] = useState(false)
@@ -29,7 +30,7 @@ export default function Report() {
   const valid: Record<Step, boolean> = {
     photo: true,
     where: !!point,
-    details: !!catType && !!seenAt && new Date(seenAt) <= new Date(Date.now() + 60_000),
+    details: !!catType && !!seenAt && seenAt <= maxTime,
     about: lost ? name.trim().length > 0 || description.trim().length > 0 : description.trim().length > 0,
   }
 
@@ -118,7 +119,7 @@ export default function Report() {
                 </div>
                 <label className="field">
                   <span className="label">Last seen</span>
-                  <input className="input" type="datetime-local" value={seenAt} max={toLocalInput(new Date())} onChange={(e) => setSeenAt(e.target.value)} />
+                  <input className="input" type="datetime-local" value={seenAt} max={maxTime} onChange={(e) => setSeenAt(e.target.value)} />
                 </label>
               </>
             )}
@@ -137,7 +138,7 @@ export default function Report() {
                 {!lost && (
                   <label className="field">
                     <span className="label">When did you find them?</span>
-                    <input className="input" type="datetime-local" value={seenAt} max={toLocalInput(new Date())} onChange={(e) => setSeenAt(e.target.value)} />
+                    <input className="input" type="datetime-local" value={seenAt} max={maxTime} onChange={(e) => setSeenAt(e.target.value)} />
                   </label>
                 )}
                 <label className="field">
