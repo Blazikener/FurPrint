@@ -1,0 +1,22 @@
+services:
+  db:
+    image: postgis/postgis:16-3.4
+    environment:
+      POSTGRES_USER: furprint
+      POSTGRES_PASSWORD: furprint
+      POSTGRES_DB: furprint
+    ports: ["5433:5432"]
+    volumes: [db:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U furprint"]
+      interval: 2s
+      retries: 30
+  app:
+    build: .
+    environment:
+      DATABASE_URL: postgresql://furprint:furprint@db:5432/furprint
+    ports: ["8000:8000"]
+    depends_on:
+      db: { condition: service_healthy }
+volumes:
+  db:

@@ -33,9 +33,12 @@ class ZoneProfile:
 
 PROFILES: dict[str, ZoneProfile] = {
     "indoor": ZoneProfile(core_m=39, likely_m=137, resolution=11, sample_size=164),
-    "outdoor": ZoneProfile(core_m=300, likely_m=1609, resolution=10, sample_size=150),
+    "outdoor": ZoneProfile(core_m=300, likely_m=1609, resolution=9, sample_size=150),
     "unknown": ZoneProfile(core_m=50, likely_m=500, resolution=10, sample_size=477),
 }
+
+# Cell size grows with the zone so each helper gets a walkable patch: ~30 m
+# hexagons for indoor cats, ~180 m blocks for outdoor ones.
 
 # The core ring of an indoor cat (39 m) is smaller than one res-11 cell
 # spacing; always give searchers at least the anchor cell and its neighbours.
