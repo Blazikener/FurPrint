@@ -552,7 +552,7 @@ if DIST.is_dir():
     app.mount("/assets", StaticFiles(directory=DIST / "assets"), name="assets")
     INDEX = (DIST / "index.html").read_text()
 
-    @app.get("/{path:path}", include_in_schema=False)
+    @app.api_route("/{path:path}", methods=["GET", "HEAD"], include_in_schema=False)
     def spa(path: str, request: Request):
         if path.startswith("api/"):
             raise HTTPException(404)
