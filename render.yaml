@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: furprint
+    runtime: docker
+    plan: free
+    region: singapore
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: ADMIN_TOKEN
+        generateValue: true
+      - key: REPORT_SALT
+        generateValue: true
+      - key: DB_POOL_SIZE
+        value: "5"

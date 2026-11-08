@@ -21,3 +21,6 @@ class RateLimiter:
         if len(hits) >= self.limit:
             raise HTTPException(429, "Too many requests, slow down a little")
         hits.append(now)
+        if len(self.hits) > 10_000:
+            for k in [k for k, v in self.hits.items() if not v or now - v[-1] > self.window_s]:
+                del self.hits[k]

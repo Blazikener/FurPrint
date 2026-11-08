@@ -296,6 +296,10 @@ p { margin: 0; }
   .flyer { padding: 0; width: 100%; }
 }
 
+.offline { position: fixed; z-index: 70; top: calc(10px + env(safe-area-inset-top)); left: 50%; translate: -50% 0; background: var(--ink); color: #fff; padding: 10px 16px; border-radius: 999px; font-size: 0.85rem; font-weight: 500; box-shadow: var(--shadow-lg); white-space: nowrap; }
+.prose h3 { margin-top: 10px; }
+.prose p { color: #3d3833; }
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; }
   .dot.live::after, .anchor-dot::before, .anchor-dot::after { display: none; }

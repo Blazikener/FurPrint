@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+import logging
 import os
 import secrets
 import uuid
@@ -9,13 +10,14 @@ from pathlib import Path
 from typing import Literal
 
 import h3
-from fastapi import Depends, FastAPI, File, Header, HTTPException, Response, UploadFile
-from fastapi.responses import FileResponse
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Request, Response, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
-from . import photos
+from . import og, photos, security
 from .db import migrate, pool
+from .maintenance import Cleaner
 from .ratelimit import RateLimiter
 from .zone import PROFILES, STUDY_URL, distance_m, snap, zone_cells
 
@@ -25,20 +27,29 @@ NEAR_MAX_AGE = timedelta(days=60)
 AREA_RESOLUTION = 8
 FOUND_RESOLUTION = 10
 SLUG_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789"
+HIDE_AFTER_REPORTS = int(os.environ.get("HIDE_AFTER_REPORTS", "3"))
+REPORT_SALT = os.environ.get("REPORT_SALT") or secrets.token_hex(16)
+ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "")
+
+logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(name)s %(message)s")
 
 write_limit = RateLimiter(limit=60, window_s=60)
 upload_limit = RateLimiter(limit=20, window_s=60)
+report_limit = RateLimiter(limit=10, window_s=3600)
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     pool.open()
     migrate()
+    cleaner = Cleaner(float(os.environ.get("CLEANUP_INTERVAL_S", "3600"))).start()
     yield
+    cleaner.close()
     pool.close()
 
 
-app = FastAPI(title="Furprint", lifespan=lifespan)
+app = FastAPI(title="Furprint", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+security.install(app)
 
 
 def now() -> datetime:
@@ -108,6 +119,11 @@ class ReviewIn(BaseModel):
 
 class StatusIn(BaseModel):
     status: Literal["open", "reunited", "closed"]
+
+
+class ReportIn(BaseModel):
+    reason: Literal["spam", "scam", "offensive", "not_a_cat", "other"]
+    note: str = Field(default="", max_length=300)
 
 
 def load_case(conn, slug: str) -> dict:
@@ -207,13 +223,13 @@ def find_matches(conn, case: dict) -> list[dict]:
     likely = "CASE l.cat_type WHEN 'indoor' THEN 137 WHEN 'outdoor' THEN 1609 ELSE 500 END"
     if case["kind"] == "lost":
         sql = f"""SELECT f.*, ST_Distance(f.geog, l.geog) AS dist
-                  FROM cases l JOIN cases f ON f.kind = 'found' AND f.status = 'open'
+                  FROM cases l JOIN cases f ON f.kind = 'found' AND f.status = 'open' AND f.hidden_at IS NULL
                   WHERE l.id = %s AND ST_DWithin(f.geog, l.geog, {likely})
                     AND f.seen_at >= l.seen_at - interval '1 day'
                   ORDER BY dist LIMIT 10"""
     else:
         sql = f"""SELECT l.*, ST_Distance(l.geog, f.geog) AS dist
-                  FROM cases f JOIN cases l ON l.kind = 'lost' AND l.status = 'open'
+                  FROM cases f JOIN cases l ON l.kind = 'lost' AND l.status = 'open' AND l.hidden_at IS NULL
                   WHERE f.id = %s AND ST_DWithin(l.geog, f.geog, {likely})
                     AND l.seen_at <= f.seen_at + interval '1 day'
                   ORDER BY dist LIMIT 10"""
@@ -231,6 +247,7 @@ def case_view(conn, case: dict, owner: bool) -> dict:
         "resolved_at": case["resolved_at"],
         "area": {"lat": area_lat, "lng": area_lng},
         "is_owner": owner,
+        "hidden": case["hidden_at"] is not None,
         "matches": find_matches(conn, case) if case["status"] == "open" else [],
         "zone": None,
         "sightings": [],
@@ -321,7 +338,89 @@ def create_case(body: CaseIn):
 def get_case(slug: str, x_owner_key: str | None = Header(default=None)):
     with pool.connection() as conn:
         case = load_case(conn, slug)
-        return case_view(conn, case, is_owner(case, x_owner_key))
+        owner = is_owner(case, x_owner_key)
+        if case["hidden_at"] and not owner:
+            raise HTTPException(410, "This case was hidden after reports from the community")
+        return case_view(conn, case, owner)
+
+
+def delete_case_rows(conn, case_id) -> None:
+    photo_ids = [r["photo_id"] for r in conn.execute(
+        """SELECT photo_id FROM cases WHERE id = %(id)s AND photo_id IS NOT NULL
+           UNION SELECT photo_id FROM sightings WHERE case_id = %(id)s AND photo_id IS NOT NULL""",
+        {"id": case_id},
+    ).fetchall()]
+    conn.execute("DELETE FROM cases WHERE id = %s", (case_id,))
+    if photo_ids:
+        conn.execute(
+            """DELETE FROM photos p WHERE p.id = ANY(%s)
+               AND NOT EXISTS (SELECT 1 FROM cases c WHERE c.photo_id = p.id)
+               AND NOT EXISTS (SELECT 1 FROM sightings s WHERE s.photo_id = p.id)""",
+            (photo_ids,),
+        )
+
+
+@app.delete("/api/cases/{slug}")
+def delete_case(slug: str, x_owner_key: str | None = Header(default=None)):
+    """Owner removes the case with every photo, sighting and claim attached to it."""
+    with pool.connection() as conn, conn.transaction():
+        case = load_case(conn, slug)
+        require_owner(case, x_owner_key)
+        delete_case_rows(conn, case["id"])
+    return {"ok": True}
+
+
+@app.post("/api/cases/{slug}/report", dependencies=[Depends(report_limit)])
+def report_case(slug: str, body: ReportIn, request: Request):
+    """Each IP counts once per case; enough distinct reporters hide the case
+    until an admin reviews it."""
+    ip = request.client.host if request.client else "unknown"
+    reporter = hmac.new(REPORT_SALT.encode(), ip.encode(), hashlib.sha256).hexdigest()
+    with pool.connection() as conn, conn.transaction():
+        case = load_case(conn, slug)
+        conn.execute(
+            """INSERT INTO reports (id, case_id, reporter_hash, reason, note) VALUES (%s, %s, %s, %s, %s)
+               ON CONFLICT (case_id, reporter_hash) DO NOTHING""",
+            (uuid.uuid4(), case["id"], reporter, body.reason, body.note.strip()),
+        )
+        count = conn.execute("SELECT count(*) AS n FROM reports WHERE case_id = %s", (case["id"],)).fetchone()["n"]
+        if count >= HIDE_AFTER_REPORTS:
+            conn.execute("UPDATE cases SET hidden_at = coalesce(hidden_at, now()) WHERE id = %s", (case["id"],))
+    return {"ok": True}
+
+
+def require_admin(authorization: str | None = Header(default=None)) -> None:
+    if not ADMIN_TOKEN:
+        raise HTTPException(404)
+    if not authorization or not hmac.compare_digest(authorization, f"Bearer {ADMIN_TOKEN}"):
+        raise HTTPException(401, "Admin token required")
+
+
+@app.get("/api/admin/reports", dependencies=[Depends(require_admin)])
+def admin_reports():
+    with pool.connection() as conn:
+        rows = conn.execute(
+            """SELECT c.slug, c.kind, c.cat_name, c.description, c.hidden_at, c.created_at,
+                      count(r.id) AS reports, array_agg(DISTINCT r.reason) AS reasons,
+                      array_remove(array_agg(r.note), '') AS notes
+               FROM cases c JOIN reports r ON r.case_id = c.id
+               GROUP BY c.id ORDER BY max(r.created_at) DESC LIMIT 200"""
+        ).fetchall()
+    return {"cases": rows}
+
+
+@app.post("/api/admin/cases/{slug}/{action}", dependencies=[Depends(require_admin)])
+def admin_action(slug: str, action: Literal["hide", "restore", "delete"]):
+    with pool.connection() as conn, conn.transaction():
+        case = load_case(conn, slug)
+        if action == "delete":
+            delete_case_rows(conn, case["id"])
+        elif action == "hide":
+            conn.execute("UPDATE cases SET hidden_at = coalesce(hidden_at, now()) WHERE id = %s", (case["id"],))
+        else:
+            conn.execute("UPDATE cases SET hidden_at = NULL WHERE id = %s", (case["id"],))
+            conn.execute("DELETE FROM reports WHERE case_id = %s", (case["id"],))
+    return {"ok": True}
 
 
 @app.post("/api/cases/{slug}/assign", dependencies=[Depends(write_limit)])
@@ -434,7 +533,7 @@ def near(lat: float, lng: float):
         rows = conn.execute(
             """SELECT *, ST_Distance(geog, ST_SetSRID(ST_MakePoint(%(lng)s, %(lat)s), 4326)::geography) AS dist
                FROM cases
-               WHERE status = 'open' AND seen_at > %(since)s
+               WHERE status = 'open' AND hidden_at IS NULL AND seen_at > %(since)s
                  AND ST_DWithin(geog, ST_SetSRID(ST_MakePoint(%(lng)s, %(lat)s), 4326)::geography, %(r)s)
                ORDER BY seen_at DESC LIMIT 50""",
             {"lat": lat, "lng": lng, "r": NEAR_RADIUS_M, "since": now() - NEAR_MAX_AGE},
@@ -449,14 +548,27 @@ def near(lat: float, lng: float):
 
 DIST = Path(os.environ.get("FRONTEND_DIST", Path(__file__).resolve().parents[2] / "frontend" / "dist"))
 
+@app.get("/robots.txt", include_in_schema=False)
+def robots():
+    return PlainTextResponse("User-agent: *\nDisallow: /api/\n")
+
+
 if DIST.is_dir():
     app.mount("/assets", StaticFiles(directory=DIST / "assets"), name="assets")
+    INDEX = (DIST / "index.html").read_text()
 
-    @app.get("/{path:path}", include_in_schema=False)
-    def spa(path: str):
+    @app.api_route("/{path:path}", methods=["GET", "HEAD"], include_in_schema=False)
+    def spa(path: str, request: Request):
         if path.startswith("api/"):
             raise HTTPException(404)
         target = (DIST / path).resolve()
         if path and target.is_file() and DIST.resolve() in target.parents:
-            return FileResponse(target)
-        return FileResponse(DIST / "index.html", headers={"Cache-Control": "no-cache"})
+            cache = "no-cache" if target.name in {"sw.js", "registerSW.js", "manifest.webmanifest"} else "public, max-age=3600"
+            return FileResponse(target, headers={"Cache-Control": cache})
+        body = INDEX
+        parts = path.strip("/").split("/")
+        if len(parts) in (2, 3) and parts[0] == "c":
+            meta = og.page_meta(parts[1], str(request.base_url))
+            if meta:
+                body = og.inject(INDEX, meta)
+        return HTMLResponse(body, headers={"Cache-Control": "no-cache"})

@@ -1,7 +1,7 @@
 import { AnimatePresence, motion } from 'motion/react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Link, useParams, useSearchParams } from 'react-router-dom'
-import { api, ApiError, helper, ownerKey, saveHelperName, saveOwnerKey, type Case, type Cell, type LatLng, type Sighting } from '../api'
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
+import { api, ApiError, helper, ownerKey, saveHelperName, saveOwnerKey, type Case, type Cell, type LatLng, type ReportReason, type Sighting } from '../api'
 import { Confetti } from '../components/Confetti'
 import { MapView } from '../components/MapView'
 import { Sheet } from '../components/Sheet'
@@ -27,12 +27,6 @@ async function share(url: string, title: string, toast: (t: string) => void) {
 }
 
 function useCase(slug: string) {
-  const [params, setParams] = useSearchParams()
-  const key = params.get('key')
-  if (key) saveOwnerKey(slug, key)
-  useEffect(() => {
-    if (key) setParams((p) => { p.delete('key'); return p }, { replace: true })
-  }, [key, setParams])
   const [data, setData] = useState<Case | null>(null)
   const [error, setError] = useState<string>('')
   const reload = useCallback(async () => {
@@ -40,7 +34,7 @@ function useCase(slug: string) {
       setData(await api.getCase(slug))
       setError('')
     } catch (e) {
-      setError(e instanceof ApiError && e.status === 404 ? 'This case does not exist.' : 'Could not load the case.')
+      setError(e instanceof ApiError && (e.status === 404 || e.status === 410) ? e.message : 'Could not load the case.')
     }
   }, [slug])
   useEffect(() => {
@@ -51,6 +45,51 @@ function useCase(slug: string) {
     return () => { window.clearInterval(t); document.removeEventListener('visibilitychange', onVisible) }
   }, [reload])
   return { data, error, reload, setData }
+}
+
+// The private owner link carries the key in the URL fragment, which browsers never send to the server.
+function claimOwnerKeyFromHash(slug: string) {
+  const match = location.hash.match(/key=([\w-]+)/)
+  if (!match) return
+  saveOwnerKey(slug, match[1])
+  history.replaceState(null, '', location.pathname + location.search)
+}
+
+const REASONS: { value: ReportReason; label: string }[] = [
+  { value: 'scam', label: 'Scam or asking for money' },
+  { value: 'spam', label: 'Spam or advert' },
+  { value: 'not_a_cat', label: 'Not a real lost or found cat' },
+  { value: 'offensive', label: 'Offensive or shares private info' },
+  { value: 'other', label: 'Something else' },
+]
+
+function ReportDialog({ open, onClose, onSend }: { open: boolean; onClose: () => void; onSend: (r: ReportReason) => Promise<void> }) {
+  const [reason, setReason] = useState<ReportReason | null>(null)
+  const [busy, setBusy] = useState(false)
+  return (
+    <Modal open={open} onClose={onClose}>
+      <div className="stack" style={{ '--gap': '14px' } as React.CSSProperties}>
+        <h2>Report this case</h2>
+        <p className="small muted">Cases reported by several people are hidden until we review them.</p>
+        <div className="choices">
+          {REASONS.map((r) => (
+            <button key={r.value} type="button" className="choice" style={{ padding: 13 }} aria-pressed={reason === r.value} onClick={() => setReason(r.value)}>
+              <span className="grow small"><b>{r.label}</b></span>
+              <span className="check" aria-hidden>{reason === r.value ? '✓' : ''}</span>
+            </button>
+          ))}
+        </div>
+        <button className="btn accent block" disabled={!reason || busy} onClick={async () => {
+          if (!reason) return
+          setBusy(true)
+          await onSend(reason)
+          setBusy(false)
+        }}>
+          <Label k={busy ? 'b' : 'n'}>{busy ? <Spinner /> : 'Send report'}</Label>
+        </button>
+      </div>
+    </Modal>
+  )
 }
 
 function NamePrompt({ open, onDone, onClose }: { open: boolean; onDone: () => void; onClose: () => void }) {
@@ -78,6 +117,7 @@ function SightingForm({ point, onCancel, onSubmit }: {
   const [photo, setPhoto] = useState<{ id: string; url: string } | null>(null)
   const [confidence, setConfidence] = useState<'sure' | 'maybe'>('sure')
   const [seenAt, setSeenAt] = useState(() => toLocalInput(new Date()))
+  const [maxTime] = useState(() => toLocalInput(new Date(Date.now() + 60_000)))
   const [note, setNote] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -92,7 +132,7 @@ function SightingForm({ point, onCancel, onSubmit }: {
         options={[{ value: 'sure', label: 'It’s this cat' }, { value: 'maybe', label: 'Might be' }]} />
       <label className="field">
         <span className="label">When</span>
-        <input className="input" type="datetime-local" value={seenAt} max={toLocalInput(new Date())} onChange={(e) => setSeenAt(e.target.value)} />
+        <input className="input" type="datetime-local" value={seenAt} max={maxTime} onChange={(e) => setSeenAt(e.target.value)} />
       </label>
       <PhotoPicker url={photo?.url ?? null} onChange={setPhoto} prompt="Add a photo if you have one" />
       <label className="field">
@@ -176,7 +216,11 @@ function SightingItem({ s, owner, anchorId, onReview }: {
 export default function CaseView() {
   const { slug = '' } = useParams()
   const [params, setParams] = useSearchParams()
+  useState(() => claimOwnerKeyFromHash(slug))
   const { data: c, error, reload } = useCase(slug)
+  const navigate = useNavigate()
+  const [reporting, setReporting] = useState(false)
+  const [confirmDelete, setConfirmDelete] = useState(false)
   const toast = useToast()
   const me = helper().helper_id
   const [tab, setTab] = useState<'sightings' | 'checklist' | 'zone'>('sightings')
@@ -195,7 +239,7 @@ export default function CaseView() {
   useEffect(() => { localStorage.setItem(`furprint:tips:${slug}`, JSON.stringify(done)) }, [done, slug])
 
   const cells = c?.zone?.cells ?? []
-  const myCells = useMemo(() => cells.filter((x) => x.state === 'claimed' && x.helper_id === me), [cells, me])
+  const myCells = useMemo(() => (c?.zone?.cells ?? []).filter((x) => x.state === 'claimed' && x.helper_id === me), [c, me])
   const selectedCell = cells.find((x) => x.h3 === selected) ?? null
 
   function withName(fn: () => void) {
@@ -411,16 +455,24 @@ export default function CaseView() {
                 </div>
               )}
 
+              {c.hidden && (
+                <div className="banner"><span aria-hidden>🔒</span><span>This case is hidden from others after community reports. Open an issue on GitHub if this is a mistake.</span></div>
+              )}
+
               <div className="banner">
                 <span aria-hidden>⚠️</span>
                 <span>Never send money to someone who says they have the cat. Meet in a public place and ask for proof first.</span>
               </div>
 
+              {!c.is_owner && (
+                <button className="btn sm ghost" style={{ alignSelf: 'center' }} onClick={() => setReporting(true)}>Report this case</button>
+              )}
+
               {c.is_owner && (
                 <div className="card flat stack" style={{ '--gap': '10px' } as React.CSSProperties}>
                   <b>Only you see this</b>
                   <p className="small muted">This browser holds your private key for this case. Save the private link to manage it from another device.</p>
-                  <button className="btn sm soft" onClick={async () => { await navigator.clipboard?.writeText(`${link}?key=${ownerKey(slug)}`); toast('Private link copied — keep it safe') }}>Copy private link</button>
+                  <button className="btn sm soft" onClick={async () => { await navigator.clipboard?.writeText(`${link}#key=${ownerKey(slug)}`); toast('Private link copied — keep it safe') }}>Copy private link</button>
                   {open ? (
                     <div className="row">
                       <button className="btn sm good grow" onClick={() => setStatus('reunited')}>{lost ? `${name} is home` : 'Returned to owner'}</button>
@@ -429,6 +481,7 @@ export default function CaseView() {
                   ) : (
                     <button className="btn sm ghost" onClick={() => setStatus('open')}>Reopen case</button>
                   )}
+                  <button className="btn sm ghost" style={{ color: '#b42318' }} onClick={() => setConfirmDelete(true)}>Delete case and photos</button>
                 </div>
               )}
             </motion.div>
@@ -449,6 +502,20 @@ export default function CaseView() {
       </Modal>
       <NamePrompt open={!!askName} onClose={() => setAskName(null)} onDone={() => { const fn = askName; setAskName(null); fn?.() }} />
       {celebrate && <Confetti />}
+      <ReportDialog open={reporting} onClose={() => setReporting(false)} onSend={async (reason) => {
+        await run(() => api.report(slug, reason), 'Thanks — we’ll take a look')
+        setReporting(false)
+      }} />
+      <Modal open={confirmDelete} onClose={() => setConfirmDelete(false)}>
+        <div className="stack" style={{ '--gap': '14px' } as React.CSSProperties}>
+          <h2>Delete this case?</h2>
+          <p className="muted small">The photo, sightings and search areas are deleted for everyone. This can’t be undone.</p>
+          <button className="btn block" style={{ background: '#b42318' }} onClick={async () => {
+            try { await api.deleteCase(slug); toast('Case deleted'); navigate('/') } catch (e) { toast(e instanceof Error ? e.message : 'Could not delete') }
+          }}>Delete for good</button>
+          <button className="btn soft block" onClick={() => setConfirmDelete(false)}>Keep it</button>
+        </div>
+      </Modal>
     </div>
   )
 }
